@@ -2,8 +2,11 @@
 
 params.assemblies_gz = "*_genomic.fna.gz"
 params.projects_accs = "Project_accessions_head.txt"
-params.publish = "${MYSCRATCH}/demo"
-
+params.publish = "demo"
+params.alienseq = "$baseDir/databases//alienTrimmerPF8contaminants.fasta"
+params.minlength = 45
+params.cpus=4
+params.mismatch=1
 compressed_assemblies = file(params.assemblies_gz)
 project_accessions = file(params.projects_accs)
 myDir = file(params.publish)
@@ -14,13 +17,13 @@ myDir.mkdirs()
  * Step 1. Builds the genome index required by the mapping process. Concatenate, and gunzip first.
  */
 process buildIndex {
-    publishDir "$myDir/demo_index"
+    publishDir "$myDir/index", mode: 'copy'
 
     input:
     file assemblies_gz from compressed_assemblies
       
     output:
-    file 'assemblies.index*' into assemblies_index
+    file("assemblies.index*") into assemblies_index
         
     shell:
     """
@@ -46,10 +49,10 @@ Channel
 
 
 process obtainRunAccessions {
-	publishDir "$myDir/demo_${x}_runAccs"
-	
+	//publishDir "$myDir/demo_${x}_runAccs" 
 	label "onlocal"
 	tag "${x}"
+    
 	
 	input:
 	val x from project
@@ -75,71 +78,110 @@ run = run_accessions.splitText().map {it -> it.trim()}
 
 process downloadReads {
 	label "onlocal"
-	publishDir "$myDir/demo_${x}_reads"
+	publishDir "$myDir/demo_${x}_reads", mode: 'copy'
 
 	input:
 	val x from project2
 	val run
 	
 	output:
-	file '*_{1,2}.fastq' into reads
-	val x into project3
-	
-	shell:
+    // if no pair we don't take this project
+	set val(x), file('*_1.fastq'), file('*_2.fastq')  optional true into readChannel
+    //val '*.fastq' into reads
+
+    shell:
 	"""
-	echo !{run}
-	fasterq-dump -e 1 !{run}
+	fasterq-dump -e 2 !{run}
 	"""
 }
 
 
-process qc {
-	publishDir "$myDir/demo_${x}_qc"
+
+/*process qc {
+	publishDir "$myDir/demo_${pair_id}_qc"
 	
 	input:
-	val x from project3
-	file "" from reads
+	set pair_id, file(forward), file(reverse) from readChannel
 
 	output:
 	file "fastqc_${pair_id}_logs" into fastqc_ch
 
-	script:
-	
-
 	shell:
 	"""
 	mkdir fastqc_!{pair_id}_logs
-	fastqc -o fastqc_!{pair_id}_logs -f fastq --quiet !{fq}
+	fastqc -o fastqc_!{pair_id}_logs !{forward} !{reverse} --quiet
 	"""
 
+}*/
+/*Channel.from(reads)
+    .map { it -> tuple(it.split('_')[0], file(it))}
+    .groupTuple()
+    .set{ readChannel }*/
+
+//Channel.from(readChannel)
+//       .subscribe { println it }
+       //.map { file -> tuple(file.baseName, file) }
+       //.groupTuple()
+       
+//.splitText(sep: "_")
+
+process filtering {
+    //publishDir "$myDir", mode: 'copy'
+    cpus params.cpus
+    memory "8G"
+
+    input:
+    set pair_id, file(forward), file(reverse) from readChannel
+    file(leptospira_genome) from assemblies_index
+
+    output:
+    set pair_id, file("mapped/*.1"), file("mapped/*.2") into mappedChannel
+
+    shell:
+    """
+    mkdir mapped
+    bowtie2 -q -N !{params.mismatch} -1 !{forward} -2 !{reverse} \
+            -x assemblies.index --al-conc mapped/ -S /dev/null \
+            -p !{params.cpus} --very-sensitive-local
+    """
 }
 
-/*
 
 process trim {
-	publishDir 
+	tag "${pair_id}" 
 
 	input:
+	set pair_id, file(forward), file(reverse) from mappedChannel
 
 	output:
+	set pair_id, file("*_R1.fastq"), file("*_R2.fastq") into trimChannel
 
 	shell:
 	"""
+	AlienTrimmer -if ${forward} -ir ${reverse} -of ${pair_id}_R1.fastq \
+                 -or ${pair_id}_R2.fastq -os ${pair_id}_sgl.fastq \
+                 -c ${params.alienseq} -l ${params.minlength}
 	"""
-
 }
 
+process assembly {
+    publishDir "$myDir", mode: 'copy'
+    memory "30G"
+    cpus params.cpus
+    tag "${pair_id}" 
 
-process mapReads {
-  input:
-  file read from reads
-  file index from assemblies_index
+    input:
+    //set pair_id, file(forward), file(reverse) from khmerChannel
+    set pair_id, file(forward), file(reverse) from trimChannel
 
-  output:
-  
+    output:
+    set pair_id, file("assembly/*_{spades}.fasta") into contigsChannel
 
-
+    shell:
+    """
+    mkdir assembly
+    spades.py -1 !{forward} -2 !{reverse} -t !{params.cpus} -o assembly/
+    rename_fasta.py -i assembly/scaffolds.fasta \
+            -s !{pair_id} -o assembly/!{pair_id}_spades.fasta
+    """
 }
-
-process spadesAssembly
-*/
